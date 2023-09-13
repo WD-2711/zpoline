@@ -1,3 +1,10 @@
+# CFLAGS = -O3 -pipe
+# CFLAGS += -Werror -Wall -Wunused-function
+# CFLAGS += -Wextra
+# CFLAGS += -shared -fPIC
+# gcc $(CFLAGS) -o libzphook_basic.so main.o $(LDFLAGS)
+
+
 PROGS = libzphook_basic.so
 
 CC = gcc

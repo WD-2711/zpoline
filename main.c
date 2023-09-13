@@ -1,20 +1,4 @@
-/*
- *
- * Copyright 2021 Kenichi Yasukata
- *
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- *
- */
+// libzpoline.so
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
@@ -32,17 +16,19 @@
 #include <sched.h>
 #include <dlfcn.h>
 
+// 注：syscall 调用时，%rdi、%rsi、%rdx、%r10、%r8、%r9 依次存储传入系统调用的参数
+// 调用链：asm_syscall_hook -> syscall_hook -> enter_syscall -> syscall
+
 #define SUPPLEMENTAL__REWRITTEN_ADDR_CHECK 1
 
+// 重写地址检查
 #ifdef SUPPLEMENTAL__REWRITTEN_ADDR_CHECK
 
 /*
- * SUPPLEMENTAL: rewritten address check
+ * SUPPLEMENTAL: 重写地址检查
  *
- * NOTE: this ifdef section is supplemental.
- *       if you wish to quicly know the core
- *       mechanism of zpoline, please skip here.
- *
+ * NOTE: 这个 ifdef 部分是补充性的。 如果您想快速了解zpoline的核心机制，请跳过这里。
+ *       
  * the objective of this part is to terminate
  * a null pointer function call.
  *
@@ -111,77 +97,61 @@ static bool is_replaced_instruction_addr(uintptr_t addr)
 
 #endif
 
+// 外部文件定义了名为 syscall_addr 的函数，不接受任何参数，返回值为 void
+// 其余函数类似
 extern void syscall_addr(void);
 extern long enter_syscall(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 extern void asm_syscall_hook(void);
 
+// 用于嵌入汇编代码
 void ____asm_impl(void)
 {
-	/*
-	 * enter_syscall triggers a kernel-space system call
-	 */
+	// enter_syscall 触发了 syscall
+	// volatile 表示不要对这段内联汇编进行优化
+	// .globl enter_syscall 表示将 enter_syscall 声明为全局符号
 	asm volatile (
 	".globl enter_syscall \n\t"
 	"enter_syscall: \n\t"
-	"movq %rdi, %rax \n\t"
-	"movq %rsi, %rdi \n\t"
-	"movq %rdx, %rsi \n\t"
-	"movq %rcx, %rdx \n\t"
-	"movq %r8, %r10 \n\t"
-	"movq %r9, %r8 \n\t"
-	"movq 8(%rsp),%r9 \n\t"
-	".globl syscall_addr \n\t"
+	"movq %rdi, %rax \n\t"                       // rax <- rdi
+	"movq %rsi, %rdi \n\t"                       // rdi <- rsi
+	"movq %rdx, %rsi \n\t"                       // rsi <- rdx
+	"movq %rcx, %rdx \n\t"                       // rdx <- rcx
+	"movq %r8, %r10 \n\t"                        // r10 <- r8
+	"movq %r9, %r8 \n\t"                         // r8  <- r9
+	"movq 8(%rsp),%r9 \n\t"                      // r9  <- [rsp+8]
+	".globl syscall_addr \n\t"                   // syscall
 	"syscall_addr: \n\t"
 	"syscall \n\t"
 	"ret \n\t"
 	);
 
-	/*
-	 * asm_syscall_hook is the address where the
-	 * trampoline code first lands.
-	 *
-	 * the procedure below calls the C function
-	 * named syscall_hook.
-	 *
-	 * at the entry point of this,
-	 * the register values follow the calling convention
-	 * of the system calls.
-	 *
-	 * this part is a bit complicated.
-	 * commit e5afaba has a bit simpler versoin.
-	 *
-	 */
+
+	// asm_syscall_hook 是 trampoline 代码首先到达的地址
+	// 下面的过程调用名为 syscall_hook 的 C 函数
+	// 在 syscall_hook 的入口点，寄存器值遵循 syscall 的调用约定
 	asm volatile (
 	".globl asm_syscall_hook \n\t"
 	"asm_syscall_hook: \n\t"
-	"popq %rax \n\t" /* restore %rax saved in the trampoline code */
+	"popq %rax \n\t"                             // 重新 pop 到 %rax
 
-	/* discard pushed 0x90 for 0xeb 0x6a 0x90 if rax is n * 3 + 1 */
-	"pushq %rdi \n\t"
-	"pushq %rax \n\t"
-	"movabs $0xaaaaaaaaaaaaaaab, %rdi \n\t"
-	"imul %rdi, %rax \n\t"
-	"cmp %rdi, %rax \n\t"
-	"popq %rax \n\t"
-	"popq %rdi \n\t"
+	// 忽略 pushed 0x90 for 0xeb 0x6a 0x90 if case 2
+	"pushq %rdi \n\t"                           
+	"pushq %rax \n\t"                            
+	"movabs $0xaaaaaaaaaaaaaaab, %rdi \n\t"      
+	"imul %rdi, %rax \n\t"                       
+	"cmp %rdi, %rax \n\t"                        // cmp 0xaaaaaaaaaaaaaaab, rax*0xaaaaaaaaaaaaaaab
+	"popq %rax \n\t"                            
+	"popq %rdi \n\t"                            
 	"jb skip_pop \n\t"
-	"addq $8, %rsp \n\t"
-	"skip_pop: \n\t"
+	"addq $8, %rsp \n\t"                         // jb: rsp <- rsp+8
 
-	"cmpq $15, %rax \n\t" // rt_sigreturn
-	"je do_rt_sigreturn \n\t"
+	"skip_pop: \n\t"
+	"cmpq $15, %rax \n\t"                        // cmp 15, rax
+	"je do_rt_sigreturn \n\t"                    // je do_rt_sigreturn
+
 	"pushq %rbp \n\t"
 	"movq %rsp, %rbp \n\t"
-
-	/*
-	 * NOTE: for xmm register operations such as movaps
-	 * stack is expected to be aligned to a 16 byte boundary.
-	 */
-
-	"andq $-16, %rsp \n\t" // 16 byte stack alignment
-
-	/* assuming callee preserves r12-r15 and rbx  */
-
+	"andq $-16, %rsp \n\t"                       // 16 字节对齐
 	"pushq %r11 \n\t"
 	"pushq %r9 \n\t"
 	"pushq %r8 \n\t"
@@ -189,20 +159,13 @@ void ____asm_impl(void)
 	"pushq %rsi \n\t"
 	"pushq %rdx \n\t"
 	"pushq %rcx \n\t"
-
-	/* arguments for syscall_hook */
-
-	"pushq 8(%rbp) \n\t"	// return address
-	"pushq %rax \n\t"
-	"pushq %r10 \n\t"
-
-	/* up to here, stack has to be 16 byte aligned */
-
+	/* syscall_hook 的参数 */
+	"pushq 8(%rbp) \n\t"	                     // push [rbp+8]
+	"pushq %rax \n\t"                            // push rax
+	"pushq %r10 \n\t"                            // push r10
 	"callq syscall_hook \n\t"
-
 	"popq %r10 \n\t"
-	"addq $16, %rsp \n\t"	// discard arg7 and arg8
-
+	"addq $16, %rsp \n\t"	
 	"popq %rcx \n\t"
 	"popq %rdx \n\t"
 	"popq %rsi \n\t"
@@ -210,9 +173,7 @@ void ____asm_impl(void)
 	"popq %r8 \n\t"
 	"popq %r9 \n\t"
 	"popq %r11 \n\t"
-
-	"leaveq \n\t"
-
+	"leaveq \n\t"                                // %rsp <- %rbp, popq %rbp
 	"retq \n\t"
 
 	"do_rt_sigreturn:"
@@ -221,16 +182,11 @@ void ____asm_impl(void)
 	);
 }
 
-static long (*hook_fn)(int64_t a1, int64_t a2, int64_t a3,
-		       int64_t a4, int64_t a5, int64_t a6,
-		       int64_t a7) = enter_syscall;
+// hook_fn 是一个函数指针，指向 enter_syscall
+static long (*hook_fn)(int64_t a1, int64_t a2, int64_t a3, int64_t a4, int64_t a5, int64_t a6, int64_t a7) = enter_syscall;
 
-long syscall_hook(int64_t rdi, int64_t rsi,
-		  int64_t rdx, int64_t __rcx __attribute__((unused)),
-		  int64_t r8, int64_t r9,
-		  int64_t r10_on_stack /* 4th arg for syscall */,
-		  int64_t rax_on_stack,
-		  int64_t retptr)
+// 定义了 syscall_hook 的函数，其中参数 __rcx 在函数中未被使用
+long syscall_hook(int64_t rdi, int64_t rsi, int64_t rdx, int64_t __rcx __attribute__((unused)), int64_t r8, int64_t r9, int64_t r10_on_stack, int64_t rax_on_stack, int64_t retptr)
 {
 #ifdef SUPPLEMENTAL__REWRITTEN_ADDR_CHECK
 	/*
@@ -249,18 +205,20 @@ long syscall_hook(int64_t rdi, int64_t rsi,
 		asm volatile ("int3");
 	}
 #endif
-
+	// rax_on_stack 指的是系统调用号
 	if (rax_on_stack == __NR_clone3)
-		return -ENOSYS; /* workaround to trigger the fallback to clone */
+		// 高级进程创建，则系统调用不可用，从而回退到 clone 系统调用（普通进程创建）
+		return -ENOSYS;
 
 	if (rax_on_stack == __NR_clone) {
-		if (rdi & CLONE_VM) { // pthread creation
-			/* push return address to the stack */
+		if (rdi & CLONE_VM) {
+			// 新进程与父进程共享虚拟内存空间
+			// 将返回地址保存到栈上
 			rsi -= sizeof(uint64_t);
 			*((uint64_t *) rsi) = retptr;
 		}
 	}
-
+	// 调用 enter_syscall
 	return hook_fn(rax_on_stack, rdi, rsi, rdx, r10_on_stack, r8, r9);
 }
 
@@ -269,13 +227,11 @@ struct disassembly_state {
 	size_t off;
 };
 
-/*
- * this actually rewrites the code.
- * this is called by the disassembler.
- */
+// 重写代码的函数 do_rewrite ，由反汇编器调用
 #ifdef NEW_DIS_ASM
 static int do_rewrite(void *data, enum disassembler_style style ATTRIBUTE_UNUSED, const char *fmt, ...)
 #else
+// data 中 code+off 指的是地址，fmt 是此地址对应的指令字符
 static int do_rewrite(void *data, const char *fmt, ...)
 #endif
 {
@@ -284,15 +240,12 @@ static int do_rewrite(void *data, const char *fmt, ...)
 	va_list arg;
 	va_start(arg, fmt);
 	vsprintf(buf, fmt, arg);
-	/* replace syscall and sysenter with callq *%rax */
+	// 将 syscall 与 sysenter 换为 callq *%rax
 	if (!strncmp(buf, "syscall", 7) || !strncmp(buf, "sysenter", 8)) {
 		uint8_t *ptr = (uint8_t *)(((uintptr_t) s->code) + s->off);
 		if ((uintptr_t) ptr == (uintptr_t) syscall_addr) {
-			/*
-			 * skip the syscall replacement for
-			 * our system call hook (enter_syscall)
-			 * so that it can issue system calls.
-			 */
+			// 此时 code+off 就是指向替换后的 syscall 地址，这是在 trampoline 中的，不必重新复写
+			// 跳过将 syscall 替换为 enter_syscall，以便它可以进行 syscall
 			goto skip;
 		}
 		ptr[0] = 0xff; // callq
@@ -306,42 +259,55 @@ skip:
 	return 0;
 }
 
-/* find syscall and sysenter using the disassembler, and rewrite them */
+// 使用反汇编器查找 syscall 与 sysenter，并进行重写
 static void disassemble_and_rewrite(char *code, size_t code_size, int mem_prot)
 {
 	struct disassembly_state s = { 0 };
-	/* add PROT_WRITE to rewrite the code */
+	// 将 code 指向的内存变为可读可写
 	assert(!mprotect(code, code_size, PROT_WRITE | PROT_READ | PROT_EXEC));
 	disassemble_info disasm_info = { 0 };
 #ifdef NEW_DIS_ASM
 	init_disassemble_info(&disasm_info, &s, (fprintf_ftype) printf, do_rewrite);
 #else
+	// 反汇编结果通过 do_rewrite 处理
+	// 初始化 disasm_info，并指定输出流 s 与输出函数 do_rewrite
 	init_disassemble_info(&disasm_info, &s, do_rewrite);
 #endif
+	// 架构：Intel x86
 	disasm_info.arch = bfd_arch_i386;
+	// 类型：x86-64
 	disasm_info.mach = bfd_mach_x86_64;
 	disasm_info.buffer = (bfd_byte *) code;
 	disasm_info.buffer_length = code_size;
 	disassemble_init_for_target(&disasm_info);
+	// disasm 是指向反汇编函数的指针
 	disassembler_ftype disasm;
 	disasm = disassembler(bfd_arch_i386, false, bfd_mach_x86_64, NULL);
 	s.code = code;
+	// 反汇编代码，并将结果保存到 disasm_info 中
+	// 每次 disasm 执行完后，就运行 do_rewrite
 	while (s.off < code_size)
 		s.off += disasm(s.off, &disasm_info);
-	/* restore the memory protection */
+	// 将内存还原
 	assert(!mprotect(code, code_size, mem_prot));
 }
 
-/* entry point for binary rewriting */
+// 二进制重写的入口点
 static void rewrite_code(void)
 {
 	FILE *fp;
-	/* get memory mapping information from procfs */
+	// 获得当前进程的内存映射
+	/*
+		7fffd8e7e000-7fffd8e9f000 rw-p 00000000 00:00 0           [stack]
+		7fffd8ebf000-7fffd8ec2000 r--p 00000000 00:00 0           [vvar]
+		7fffd8ec2000-7fffd8ec3000 r-xp 00000000 00:00 0           [vdso]
+	*/
 	assert((fp = fopen("/proc/self/maps", "r")) != NULL);
 	{
 		char buf[4096];
+		// 循环读取 4096 字节的内存，也就是一行
 		while (fgets(buf, sizeof(buf), fp) != NULL) {
-			/* we do not touch stack and vsyscall memory */
+			// 不对 stack 与 vsyscall 所占的内存做处理
 			if (((strstr(buf, "stack") == NULL) && (strstr(buf, "vsyscall") == NULL))) {
 				int i = 0;
 				char addr[65] = { 0 };
@@ -349,9 +315,11 @@ static void rewrite_code(void)
 				while (c != NULL) {
 					switch (i) {
 					case 0:
+						// 7fffd8e7e000-7fffd8e9f000
 						strncpy(addr, c, sizeof(addr) - 1);
 						break;
 					case 1:
+						// rw-p
 						{
 							int mem_prot = 0;
 							{
@@ -365,9 +333,10 @@ static void rewrite_code(void)
 										mem_prot |= PROT_EXEC;
 								}
 							}
-							/* rewrite code if the memory is executable */
+							// 如果 code 可执行，那么就进行重写
 							if (mem_prot & PROT_EXEC) {
 								size_t k;
+								// 找到 '-'
 								for (k = 0; k < strlen(addr); k++) {
 									if (addr[k] == '-') {
 										addr[k] = '\0';
@@ -378,20 +347,15 @@ static void rewrite_code(void)
 									int64_t from, to;
 									from = strtol(&addr[0], NULL, 16);
 									if (from == 0) {
-										/*
-										 * this is trampoline code.
-										 * so skip it.
-										 */
+										// 起始地址为 0 时为 trampoline 代码，故跳过
 										break;
 									}
 									to = strtol(&addr[k + 1], NULL, 16);
-									disassemble_and_rewrite((char *) from,
-											(size_t) to - from,
-											mem_prot);
+									disassemble_and_rewrite((char *) from, (size_t) to - from, mem_prot);
 								}
 							}
 						}
-						break;
+						bereak;
 					}
 					if (i == 1)
 						break;
@@ -404,17 +368,14 @@ static void rewrite_code(void)
 	fclose(fp);
 }
 
-#define NR_syscalls (512) // bigger than max syscall number
+#define NR_syscalls (512)
 
 static void setup_trampoline(void)
 {
 	void *mem;
 
-	/* allocate memory at virtual address 0 */
-	mem = mmap(0 /* virtual address 0 */, 0x1000,
-			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED,
-			-1, 0);
+	// 分配虚拟地址 0
+	mem = mmap(0, 0x1000, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
 	if (mem == MAP_FAILED) {
 		fprintf(stderr, "map failed\n");
 		fprintf(stderr, "NOTE: /proc/sys/vm/mmap_min_addr should be set 0\n");
@@ -423,35 +384,36 @@ static void setup_trampoline(void)
 
 	{
 		/*
-		 * optimized instructions to slide down
-		 * repeat of 0xeb 0x6a 0x90
-		 *
-		 * case 1 : jmp to n * 3 + 0
-		 * jmp 0x6a
-		 * nop
-		 * jmp 0x6a
-		 * nop
-		 *
-		 * case 2 : jmp to n * 3 + 1
-		 * push 0x90
-		 * jmp 0x6a
-		 * nop
-		 * jmp 0x6a
-		 *
-		 * case 3 : jmp to n * 3 + 2
-		 * nop
-		 * jmp 0x6a
-		 * nop
-		 * jmp 0x6a
-		 *
-		 * for case 2, we discard 0x90 pushed to stack
-		 *
-		 */
+			论文中在 0-512 中填充 nop(0x90)
+			优化后填充 0xeb 0x6a 0x90
+
+			* case 1 : jmp to n * 3 + 0
+			* jmp 0x6a（相对跳转）
+			* nop
+			* jmp 0x6a
+			* nop
+
+			* case 2 : jmp to n * 3 + 1
+			* push 0x90
+			* jmp 0x6a
+			* nop
+			* jmp 0x6a
+
+			* case 3 : jmp to n * 3 + 2
+			* nop
+			* jmp 0x6a
+			* nop
+			* jmp 0x6a			
+
+			对于 case 2，我们忽略堆栈中的 0x90
+		*/
 		int i;
 		for (i = 0; i < NR_syscalls; i++) {
 			if (NR_syscalls - 0x6a - 2 < i)
+				// 404 -> 512 设置为 nop
 				((uint8_t *) mem)[i] = 0x90;
 			else {
+				// 0 -> 404 设置为 0xeb 0x6a 0x90
 				int x = i % 3;
 				switch (x) {
 				case 0:
@@ -469,25 +431,16 @@ static void setup_trampoline(void)
 	}
 
 	/* 
-	 * put code for jumping to asm_syscall_hook.
-	 *
-	 * here we embed the following code.
-	 *
-	 * push   %rax
-	 * movabs [asm_syscall_hook],%rax
-	 * jmpq   *%rax
-	 *
-	 */
+		放置跳转到 asm_syscall_hook 的代码，写以下代码：
+		* push   %rax
+		* movabs [asm_syscall_hook], %rax
+		* jmpq   *%rax		
+	*/
 
-	/*
-	 * save %rax on stack before overwriting
-	 * with "movabs [asm_syscall_hook],%rax",
-	 * and the saved value is resumed in asm_syscall_hook.
-	 */
-	// 50                      push   %rax
+	// 在用 movabs [asm_syscall_hook],%rax 覆盖之前将 %rax 保存在堆栈上，并且保存的 %rax 在 asm_syscall_hook 中恢复
+	// 50 --- push   %rax
 	((uint8_t *) mem)[NR_syscalls + 0x0] = 0x50;
-
-	// 48 b8 [64-bit addr (8-byte)]   movabs [asm_syscall_hook],%rax
+	// 48 b8 [64-bit addr (8-byte)] --- movabs [asm_syscall_hook], %rax
 	((uint8_t *) mem)[NR_syscalls + 0x1] = 0x48;
 	((uint8_t *) mem)[NR_syscalls + 0x2] = 0xb8;
 	((uint8_t *) mem)[NR_syscalls + 0x3] = ((uint64_t) asm_syscall_hook >> (8 * 0)) & 0xff;
@@ -498,20 +451,15 @@ static void setup_trampoline(void)
 	((uint8_t *) mem)[NR_syscalls + 0x8] = ((uint64_t) asm_syscall_hook >> (8 * 5)) & 0xff;
 	((uint8_t *) mem)[NR_syscalls + 0x9] = ((uint64_t) asm_syscall_hook >> (8 * 6)) & 0xff;
 	((uint8_t *) mem)[NR_syscalls + 0xa] = ((uint64_t) asm_syscall_hook >> (8 * 7)) & 0xff;
-
-	// ff e0                   jmpq   *%rax
+	// ff e0 --- jmpq   *%rax
 	((uint8_t *) mem)[NR_syscalls + 0xb] = 0xff;
 	((uint8_t *) mem)[NR_syscalls + 0xc] = 0xe0;
 
-	/*
-	 * mprotect(PROT_EXEC without PROT_READ), executed
-	 * on CPUs supporting Memory Protection Keys for Userspace (PKU),
-	 * configures this memory region as eXecute-Only-Memory (XOM).
-	 * this enables to cause a segmentation fault for a NULL pointer access.
-	 */
+	// 改为仅执行内存 XOM，这样的话如果出现 NULL 指针访问，则会报分段错误
 	assert(!mprotect(0, 0x1000, PROT_EXEC));
 }
 
+// 加载 hooklib
 static void load_hook_lib(void)
 {
 	void *handle;
@@ -522,7 +470,7 @@ static void load_hook_lib(void)
 			fprintf(stderr, "env LIBZPHOOK is empty, so skip to load a hook library\n");
 			return;
 		}
-
+		// 使用 dlmopen
 		handle = dlmopen(LM_ID_NEWLM, filename, RTLD_NOW | RTLD_LOCAL);
 		if (!handle) {
 			fprintf(stderr, "dlmopen failed: %s\n\n", dlerror());
