@@ -470,7 +470,7 @@ static void load_hook_lib(void)
 			fprintf(stderr, "env LIBZPHOOK is empty, so skip to load a hook library\n");
 			return;
 		}
-		// 使用 dlmopen
+		// 使用 dlmopen 加载库，创建一个新的命名空间，共享库符号不会与其他命名空间共享
 		handle = dlmopen(LM_ID_NEWLM, filename, RTLD_NOW | RTLD_LOCAL);
 		if (!handle) {
 			fprintf(stderr, "dlmopen failed: %s\n\n", dlerror());
@@ -479,6 +479,7 @@ static void load_hook_lib(void)
 		}
 	}
 	{
+		// 从动态链接库中找 __hook_init 函数
 		int (*hook_init)(long, ...);
 		hook_init = dlsym(handle, "__hook_init");
 		assert(hook_init);
@@ -490,6 +491,7 @@ static void load_hook_lib(void)
 	}
 }
 
+// __zpoline_init 代表在程序加载时自动执行
 __attribute__((constructor(0xffff))) static void __zpoline_init(void)
 {
 #ifdef SUPPLEMENTAL__REWRITTEN_ADDR_CHECK
